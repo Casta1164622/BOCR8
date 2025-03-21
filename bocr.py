@@ -2,103 +2,109 @@ import cv2
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog
-
-def detect_braille_dots(image_path):
-    # Cargar la imagen en escala de grises
-    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    
-    # Aplicar un desenfoque para reducir el ruido
-    blurred = cv2.GaussianBlur(image, (5, 5), 0)
-    
-    # Aplicar umbralización adaptativa para detectar los puntos
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    
-    # Encontrar contornos de los puntos detectados
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Filtrar contornos por tamaño
-    dot_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 10]
-    
-    return image, dot_contours
-
-def group_braille_dots(dot_contours):
-    # Obtener los centros de los puntos
-    centers = [cv2.moments(cnt) for cnt in dot_contours]
-    centers = [(int(c["m10"] / c["m00"]), int(c["m01"] / c["m00"])) for c in centers if c["m00"] != 0]
-    
-    # Ordenar por posición Y y luego por X
-    centers.sort(key=lambda x: (x[1], x[0]))
-    
-    # Agrupar en conjuntos de 6 (2x3)
-    braille_cells = [centers[i:i + 6] for i in range(0, len(centers), 6)]
-    
-    return braille_cells, centers
-
-def merge_and_draw_grid(image, braille_cells, centers):
-    output = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    merged_cells = []
-    
-    # Unir rectángulos con la misma altura en uno más grande
-    for cell in braille_cells:
-        if len(cell) == 6:
-            x_coords = [p[0] for p in cell]
-            y_coords = [p[1] for p in cell]
-            
-            x_min, x_max = min(x_coords), max(x_coords)
-            y_min, y_max = min(y_coords), max(y_coords)
-            
-            merged_cells.append((x_min, y_min, x_max, y_max))
-    
-    # Agrupar por altura para unirlos horizontalmente
-    merged_cells.sort(key=lambda r: (r[1], r[0]))
-    combined_rects = []
-    
-    while merged_cells:
-        x_min, y_min, x_max, y_max = merged_cells.pop(0)
-        i = 0
-        while i < len(merged_cells):
-            x2_min, y2_min, x2_max, y2_max = merged_cells[i]
-            if y_min == y2_min and y_max == y2_max:  # Misma altura
-                x_max = max(x_max, x2_max)  # Unir horizontalmente
-                merged_cells.pop(i)
-            else:
-                i += 1
-        combined_rects.append((x_min, y_min, x_max, y_max))
-    
-    # Dibujar los rectángulos combinados en azul
-    for x_min, y_min, x_max, y_max in combined_rects:
-        cv2.rectangle(output, (x_min-5, y_min-5), (x_max+5, y_max+5), (255, 0, 0), 2)
-    
-    # Dibujar un cuadrado rojo que encierra todos los puntos detectados
-    if centers:
-        all_x = [p[0] for p in centers]
-        all_y = [p[1] for p in centers]
-        
-        x_min, x_max = min(all_x), max(all_x)
-        y_min, y_max = min(all_y), max(all_y)
-        
-        cv2.rectangle(output, (x_min-10, y_min-10), (x_max+10, y_max+10), (0, 0, 255), 2)
-    
-    return output
+from collections import Counter
 
 def select_image():
     root = tk.Tk()
     root.withdraw()
-    file_path = filedialog.askopenfilename(title="Seleccionar imagen", filetypes=[("Imagenes", "*.jpg;*.png;*.jpeg")])
-    return file_path
+    return filedialog.askopenfilename(title="Selecciona una imagen", filetypes=[("Archivos de imagen", "*.jpg;*.png;*.jpeg")])
+
+def detect_braille_dots(image_path):
+    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    blurred = cv2.GaussianBlur(image, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 150, 255, cv2.THRESH_BINARY_INV)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    dots = [cv2.boundingRect(cnt) for cnt in contours if cv2.contourArea(cnt) > 10]
+    dots.sort(key=lambda b: (b[1], b[0]))  # Ordenar primero por Y, luego por X
+    return dots, image
+
+def calcular_interlineado(dots, y_min, y_max):
+    filas = [[] for _ in range(3)]
+    altura_total = y_max - y_min
+    altura_fila = altura_total / 3
+
+    for x, y, w, h in dots:
+        centro_y = y + h // 2
+        fila_idx = int((centro_y - y_min) / altura_fila)
+        if 0 <= fila_idx < 3:
+            centro_x = x + w // 2
+            filas[fila_idx].append(centro_x)
+
+    distancias = []
+    for fila in filas:
+        fila.sort()
+        for i in range(1, len(fila)):
+            distancias.append(fila[i] - fila[i - 1])
+
+    if not distancias:
+        return None
+
+    redondeadas = [round(d / 5) * 5 for d in distancias]
+    moda = Counter(redondeadas).most_common(1)[0][0]
+    return moda
+
+def draw_grid(image, dots):
+    output = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+    # Agrupar en celdas 2x3
+    cells = []
+    for i in range(0, len(dots), 6):
+        group = dots[i:i+6]
+        if len(group) == 6:
+            x_min = min(dot[0] for dot in group)
+            y_min = min(dot[1] for dot in group)
+            x_max = max(dot[0] + dot[2] for dot in group)
+            y_max = max(dot[1] + dot[3] for dot in group)
+            cells.append((x_min, y_min, x_max, y_max))
+
+    if not cells:
+        return output
+
+    x1_all = min(cell[0] for cell in cells)
+    y1_all = min(cell[1] for cell in cells)
+    x2_all = max(cell[2] for cell in cells)
+    y2_all = max(cell[3] for cell in cells)
+
+    # Dibujar rectángulo global
+    cv2.rectangle(output, (x1_all, y1_all), (x2_all, y2_all), (0, 0, 255), 3)
+
+    # Altura de cuadrito
+    cell_height = (y2_all - y1_all) // 3
+    interlineado = calcular_interlineado(dots, y1_all, y2_all)
+    if not interlineado:
+        print("No se pudo calcular interlineado.")
+        return output
+
+    # Iniciar desde el borde izquierdo
+    x = x1_all
+    y_positions = [y1_all + i * cell_height for i in range(3)]
+
+    while x + cell_height <= x2_all:
+        # 1. Cuadro de agrupación (cuadrado)
+        for y in y_positions:
+            cv2.rectangle(output, (x, y), (x + cell_height, y + cell_height), (0, 165, 255), 2)  # naranja
+
+        x += cell_height
+
+        # 2. Cuadro de interlineado (más angosto)
+        if x + interlineado <= x2_all:
+            for y in y_positions:
+                cv2.rectangle(output, (x, y), (x + interlineado, y + cell_height), (0, 255, 255), 1)  # amarillo
+            x += interlineado
+        else:
+            break  # no hay espacio suficiente para otro interlineado + agrupación
+
+    return output
 
 def main():
     image_path = select_image()
     if not image_path:
         print("No se seleccionó ninguna imagen.")
         return
-    
-    image, dot_contours = detect_braille_dots(image_path)
-    braille_cells, centers = group_braille_dots(dot_contours)
-    output = merge_and_draw_grid(image, braille_cells, centers)
-    
-    # Mostrar la imagen con la cuadrícula
-    cv2.imshow("Braille Detection", output)
+
+    dots, image = detect_braille_dots(image_path)
+    result = draw_grid(image, dots)
+    cv2.imshow('Braille Grid Detection', result)
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
